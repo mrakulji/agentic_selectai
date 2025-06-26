@@ -1,0 +1,6 @@
+oracledb
+langchain-core
+langchain-community
+python-dotenv
+gradio
+typing_extensions
