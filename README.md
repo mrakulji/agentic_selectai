@@ -1,7 +1,7 @@
 
 # Agentic SelectAI
 
-Agentic SelectAI is an advanced, agentic workflow for natural language to SQL (NL2SQL) question answering and data exploration, specifically tailored for clinical/medical trial datasets. It leverages Oracle Autonomous Database, Oracle Cloud Infrastructure Generative AI, and the LangChain framework to iteratively refine user questions, generate and validate SQL, and produce concise natural language answers.
+Agentic SelectAI is an advanced, agentic workflow for natural language to SQL (NL2SQL) question answering and data exploration. This example is specifically tailored for clinical/medical trial datasets. It leverages Oracle Autonomous Database 23ai, Oracle Cloud Infrastructure Generative AI, and the LangChain framework to iteratively refine user questions, generate and validate SQL, and produce concise natural language answers.
 
 ## Features
 
@@ -23,7 +23,8 @@ Agentic SelectAI is an advanced, agentic workflow for natural language to SQL (N
 ## Requirements
 
 *   Python 3.8+
-*   Oracle Autonomous Database 23ai (download wallet for DB connection)
+*   Oracle Autonomous Database 23ai
+*   OCI GenAI or any other LLM
 *   `oracledb` Python library
 *   `LangChain`, `LangChain Community`, `LangChain Core`
 *   `dotenv`
