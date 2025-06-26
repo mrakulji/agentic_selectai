@@ -24,7 +24,7 @@ Agentic SelectAI is an advanced, agentic workflow for natural language to SQL (N
 
 *   Python 3.8+
 *   Oracle Autonomous Database 23ai
-*   OCI GenAI or any other LLM
+*   OCI GenAI (or any other LLM)
 *   `oracledb` Python library
 *   `LangChain`, `LangChain Community`, `LangChain Core`
 *   `dotenv`
