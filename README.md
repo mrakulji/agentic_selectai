@@ -23,7 +23,7 @@ Agentic SelectAI is an advanced, agentic workflow for natural language to SQL (N
 ## Requirements
 
 *   Python 3.8+
-*   Oracle Database (with Autonomous Data Warehouse and Oracle Cloud wallet)
+*   Oracle Autonomous Database 23ai (download wallet for DB connection)
 *   `oracledb` Python library
 *   `LangChain`, `LangChain Community`, `LangChain Core`
 *   `dotenv`
@@ -36,18 +36,25 @@ Agentic SelectAI is an advanced, agentic workflow for natural language to SQL (N
     pip install oracledb langchain-core langchain-community python-dotenv gradio
     ```
 
-2.  **Set up Oracle credentials**: Edit the `DB_CONFIG` dictionary in `agentic-selectai.py` with your Oracle username, password, DSN, config directory, wallet location, and wallet password.
+2.  **Set up Oracle credentials and enable Select AI**: Edit the `DB_CONFIG` dictionary in `agentic-selectai.py` with your Oracle username, password, DSN, config directory, wallet location, and wallet password.
 
 3.  **Set up OCI Generative AI config**: Update the `model_id`, `service_endpoint`, and `compartment_id` in the `ChatOCIGenAI` instantiation.
 
 4.  **Environment Variables**: Place your `.env` file (if needed) in the project root with any necessary environment variables.
+
+References:
+* https://docs.oracle.com/en-us/iaas/Content/generative-ai-agents/setup-oci-api-auth.htm
+* https://docs.oracle.com/en/cloud/paas/autonomous-database/serverless/adbsb/connect-download-wallet.html
+* https://docs.oracle.com/en-us/iaas/Content/generative-ai/endpoint.htm
+* https://docs.oracle.com/en/cloud/paas/autonomous-database/serverless/adbsb/select-ai-get-started.html
+
 
 ## Usage
 
 Run the chat interface with:
 
 ```bash
-python agentic-selectai.py
+python agentic_selectai.py
 ```
 
 You will be presented with a Gradio web interface where you can ask questions about your clinical trial data.
