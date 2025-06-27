@@ -1,39 +1,36 @@
-from typing_extensions import TypedDict
-from dotenv import load_dotenv
+"""
+This script implements a multi-agent AI system using LangGraph to answer natural
+language questions about medical trial data stored in an Oracle Database.
+
+The system follows a refined query process:
+1.  An initial question is sent to Oracle's Select AI to generate and execute a SQL query.
+2.  A "QA Agent" (LLM) evaluates if the query result correctly answers the question.
+3.  If the result is unsatisfactory, a "Refiner Agent" (LLM) improves the original
+    question based on the feedback and a medical term dictionary. The process repeats.
+4.  Once the QA Agent passes the result, a final agent converts the structured
+    JSON data into a human-readable, natural language answer.
+5.  The entire application is exposed through a Gradio chat interface.
+"""
+
 import os
+from typing import List
+
+import gradio as gr
 import oracledb
-from langchain_core.prompts import PromptTemplate
+from dotenv import load_dotenv
 from langchain_community.chat_models.oci_generative_ai import ChatOCIGenAI
-
 from langchain_core.messages import HumanMessage
+from langchain_core.prompts import PromptTemplate
+from langgraph.graph import END, START, StateGraph
+from typing_extensions import TypedDict
 
+# Load environment variables from a .env file
 load_dotenv()
 
-nl = '\n'
+# --- CONSTANTS ---
 
-DB_CONFIG = {
-    "user": "admin",
-    "password": "<db password>",
-    "dsn": "TSTAI_HIGH",
-    "config_dir": "<config dir>",
-    "wallet_location": "<wallet location>",
-    "wallet_password": "<wallet password>",
-    "thick_mode": "False"
-}
-
-connection = oracledb.connect(
-    config_dir=DB_CONFIG["config_dir"],
-    user=DB_CONFIG["user"],
-    password=DB_CONFIG["password"],
-    dsn=DB_CONFIG["dsn"],
-    wallet_location=DB_CONFIG["wallet_location"],
-    wallet_password=DB_CONFIG["wallet_password"]
-)
-
-#Iteration counter
-c = 0
-
-medical_term_dict = """
+# A dictionary for translating common medical terms to their standard abbreviations.
+MEDICAL_TERM_DICT = """
 Patient = Subject
 Coronary Artery Bypass Graft = CABG
 Type 1 Diabetes Mellitus = DM1
@@ -50,7 +47,8 @@ Electrocardiogram = ECGP
 Initial Point of Reference Check = baseline
 Initial visit = baseline visit"""
 
-improvequestionstr = """You are a highly skilled medical language simplification expert. Your task is to take complex, medically worded clinical questions and rephrase them into simpler, more direct natural language questions, **using a provided medical terminology translation dictionary to replace medical terms with their standard medical abbreviations.**
+# Prompt template for the "Refiner Agent" to improve the user's question.
+IMPROVE_QUESTION_TEMPLATE = """You are a highly skilled medical language simplification expert. Your task is to take complex, medically worded clinical questions and rephrase them into simpler, more direct natural language questions, **using a provided medical terminology translation dictionary to replace medical terms with their standard medical abbreviations.**
 
 **The Goal:**
 
@@ -116,16 +114,20 @@ Here are some examples of medically worded questions and their desired reworded 
 
 **Example Input:**
 
-```
+
 "What is the average systolic blood pressure for subjects at baseline visit who are in the Cardiovex treatment arm?"
-```
 
+Generated code
 **Example Expected Output:**
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END
 
-```
 "What is the average SYSBP for patients at their first visit who are receiving Cardiovex treatment?"
-```
 
+Generated code
 **Now, please reword the following medically worded clinical question into a simpler, more direct natural language question, remembering to avoid any table or column names and maintain the original intent:**
 
 Question: {question}
@@ -136,8 +138,8 @@ Medical Terminology Translation Dictionary:
 {medical_term_dictionary}
 """
 
-
-gatepromptstr = """You are a highly skilled SQL Quality Assurance (QA) expert. Your task is to evaluate if a provided SQL query accurately answers a user's natural language question, based on the question and the **actual JSON formatted result** of executing that query.
+# Prompt template for the "QA Gate Agent" to validate the SQL result.
+GATE_PROMPT_TEMPLATE = """You are a highly skilled SQL Quality Assurance (QA) expert. Your task is to evaluate if a provided SQL query accurately answers a user's natural language question, based on the question and the **actual JSON formatted result** of executing that query.
 
 **Important:** You **cannot execute any SQL queries** and **will not be provided with the SQL query itself**. You must determine correctness based *only* on the *text* of the user question and the **JSON formatted result** of executing the SQL query. You do not have access to any database schema, table names, or column names beyond what is provided in the question and JSON result.
 
@@ -220,10 +222,11 @@ A "correct" SQL Query Result (JSON) is one that:
 
 Please evaluate if the provided **SQL Query Result (JSON)** is correct and effectively answers the **User Question**, based on the criteria above. Output either "Pass" or "Fail: [Reason]".
 Question: {{ question }}
-Simulated SQL Result: {{ result }}"""
+Simulated SQL Result: {{ result }}
+"""
 
-
-result2nlstr = """You are an expert in generating clear and concise natural language answers from structured data. Your task is to take a user's original question, the SQL query that was intended to answer it, and the JSON formatted result of executing that SQL query, and produce a human-readable answer to the user's question.
+# Prompt template for the "Formatter Agent" to convert final JSON to natural language.
+RESULT_TO_NL_TEMPLATE = """You are an expert in generating clear and concise natural language answers from structured data. Your task is to take a user's original question, the SQL query that was intended to answer it, and the JSON formatted result of executing that SQL query, and produce a human-readable answer to the user's question.
 
 **Input:**
 
@@ -296,168 +299,289 @@ User Question: {{ question }}
 Generated SQL Query: {{ sql }}
 SQL Query Result: {{ result }}
 """
-import gradio as gr
 
-improve_question_prompt = PromptTemplate(
-    input_variables=["question", "questionhistory", "feedback", "medical_term_dictionary"],
-    template=improvequestionstr
-)
+MAX_RETRIES = 5
+# A global counter to prevent infinite loops in the refinement process.
+retry_counter = 0
 
-check_selectai_output_prompt = PromptTemplate(
-    input_variables=["question", "result"],
-    template=gatepromptstr,
-    template_format="jinja2"
-)
 
-result2nl_prompt = PromptTemplate(
-    input_variables=["question", "sql", "result"],
-    template=result2nlstr,
-    template_format="jinja2"
-)
+# --- CONFIGURATION ---
 
-llm = ChatOCIGenAI(
-    model_id="<LLM model id>",
-    service_endpoint="<OCI GenAI service endpoint>",
-    compartment_id="<compartment id>",
-    model_kwargs={"temperature": 0.7, "max_tokens": 500},
-)
+def setup_llm() -> ChatOCIGenAI:
+    """Initializes and returns the OCI Generative AI chat model."""
+    return ChatOCIGenAI(
+        model_id=os.environ.get("OCI_MODEL_ID"),
+        service_endpoint=os.environ.get("OCI_SERVICE_ENDPOINT"),
+        compartment_id=os.environ.get("OCI_COMPARTMENT_ID"),
+        model_kwargs={"temperature": 0.7, "max_tokens": 500},
+    )
 
-# Graph state
+
+def setup_database_connection() -> oracledb.Connection:
+    """
+    Reads database configuration from environment variables and
+    returns an Oracle database connection object.
+    """
+    db_config = {
+        "user": os.environ.get("DB_USER"),
+        "password": os.environ.get("DB_PASSWORD"),
+        "dsn": os.environ.get("DB_DSN"),
+        "config_dir": os.environ.get("DB_CONFIG_DIR"),
+        "wallet_location": os.environ.get("DB_WALLET_LOCATION"),
+        "wallet_password": os.environ.get("DB_WALLET_PASSWORD"),
+    }
+    print("🔌 Connecting to Oracle Database...")
+    connection = oracledb.connect(
+        user=db_config["user"],
+        password=db_config["password"],
+        dsn=db_config["dsn"],
+        config_dir=db_config["config_dir"],
+        wallet_location=db_config["wallet_location"],
+        wallet_password=db_config["wallet_password"],
+    )
+    print("✅ Database connection successful.")
+    return connection
+
+
+# --- LANGGRAPH STATE AND NODES ---
+
 class State(TypedDict):
+    """Defines the state structure for the LangGraph workflow."""
     questionlatest: str
     sqllatest: str
     resultlatest: str
-    questionhistory: list
-    sqlhistory: list
-    resulthistory: list
+    questionhistory: List[str]
+    sqlhistory: List[str]
+    resulthistory: List[str]
     feedback: str
     nl: str
 
 
-# Nodes
-def selectai(state: State):
-    """Create a SQL Query and execute it"""
+def selectai(state: State, connection: oracledb.Connection) -> dict:
+    """
+    Node that uses Oracle Select AI to generate and execute a SQL query.
 
-    query = """SELECT DBMS_CLOUD_AI.GENERATE(
-                prompt       => :prompt,
-                profile_name => 'OCI_GENAI_PROFILE',
-                action       => :action)
-            FROM dual"""
+    Args:
+        state: The current state of the workflow.
+        connection: The Oracle database connection object.
+
+    Returns:
+        A dictionary updating the state with the latest SQL and result.
+    """
+    print(f"💿 [SelectAI] Received question: {state['questionlatest']}")
+
+    query = """
+        SELECT DBMS_CLOUD_AI.GENERATE(
+            prompt       => :prompt,
+            profile_name => 'OCI_GENAI_TSTAPX_COMMENTS',
+            action       => :action
+        )
+        FROM dual
+    """
     
-    print(f"💿 ### NEW QUESTION ###: {state['questionlatest']}{nl}")
-
-    ##For demo purposes this step explains the SQL generation process   
+    # First, get the SQL explanation
     try:
         with connection.cursor() as cursor:
             cursor.execute(query, {'prompt': state['questionlatest'], 'action': 'explainsql'})
             result = cursor.fetchone()
             if result and isinstance(result[0], oracledb.LOB):
-                text_result = result[0].read()
-                print(f"💿 ### SelectAI Explain Query ###: {text_result}{nl}")
-                state['sqllatest'] = text_result[:3000]
+                sql_explanation = result[0].read()
+                print(f"💿 [SelectAI] Generated SQL: {sql_explanation}\n")
+                state['sqllatest'] = sql_explanation[:3000]
+            else:
+                state['sqllatest'] = "NONE"
     except Exception as e:
+        print(f"🚨 [SelectAI] Error generating SQL: {e}")
         return {"sqllatest": "NONE", "resultlatest": "NONE"}
-    
-    ##SQL execution
+
+    # Second, run the SQL to get the result
     try:
         with connection.cursor() as cursor:
             cursor.execute(query, {'prompt': state['questionlatest'], 'action': 'runsql'})
             result = cursor.fetchone()
             if result and isinstance(result[0], oracledb.LOB):
                 text_result = result[0].read()
-                print(f"💿 ### SelectAI Result ###: {text_result}{nl}")
+                print(f"💿 [SelectAI] Query Result (JSON): {text_result}\n")
                 state['resultlatest'] = text_result[:3000]
-        #print(f" ### Select AI Question ###: {state['questionlatest']}{nl}, ### SQL ###: {state['sqllatest']}{nl}, ### Result ###: {state['resultlatest']}{nl}")
-        return {"sqllatest": state['sqllatest'], "resultlatest": state['resultlatest']}
+            else:
+                state['resultlatest'] = "NONE"
     except Exception as e:
-        # return {f"Error: {e}"}
-        print(f"💿 SelectAI: Result: NONE{nl}")
-        return {"sqllatest": state['sqllatest'], "resultlatest": "NONE"}
+        print(f"🚨 [SelectAI] Error executing SQL: {e}")
+        state['resultlatest'] = "NONE"
 
-def improve_question(state: State):
-    """LLM call to improve the question"""
-    print("Question History: ", state['questionhistory'])
-    prompt_string = improve_question_prompt.format(question=state['questionlatest'], questionhistory=state['questionhistory'], feedback=state['feedback'], medical_term_dictionary=medical_term_dict)
-    messages = [HumanMessage(content=prompt_string)] # Explicitly create HumanMessage
+    return {"sqllatest": state['sqllatest'], "resultlatest": state['resultlatest']}
 
-    #print(f"👨🏼‍🔧 Improve AI - Prompt to LLM: {prompt_string}{nl}")
 
-    question_response = llm.invoke(messages)
-    question = question_response.content
+def improve_question(state: State, llm: ChatOCIGenAI) -> dict:
+    """
+    Node that calls an LLM to refine the question based on feedback.
+
+    Args:
+        state: The current state of the workflow.
+        llm: The language model instance.
+
+    Returns:
+        A dictionary updating the state with the new, improved question.
+    """
+    print("👨🏼‍🔧 [Refiner Agent] Improving question based on feedback...")
+    prompt_template = PromptTemplate(
+        input_variables=["question", "questionhistory", "feedback", "medical_term_dictionary"],
+        template=IMPROVE_QUESTION_TEMPLATE
+    )
+    prompt_string = prompt_template.format(
+        question=state['questionlatest'],
+        questionhistory=state['questionhistory'],
+        feedback=state['feedback'],
+        medical_term_dictionary=MEDICAL_TERM_DICT
+    )
+    
+    messages = [HumanMessage(content=prompt_string)]
+    response = llm.invoke(messages)
+    improved_question = response.content
 
     state['questionhistory'].append(state['questionlatest'])
-    state['questionlatest'] = question
+    state['questionlatest'] = improved_question
 
-    print(f"👨🏼‍🔧 ### Improve Question ###: {state['questionlatest']}{nl}")
-      
-    return {"questionlatest": question, "questionhistory": state['questionhistory']}
+    print(f"👨🏼‍🔧 [Refiner Agent] New improved question: {improved_question}\n")
+    return {"questionlatest": improved_question, "questionhistory": state['questionhistory']}
 
-# Conditional edge function to check the Select AI output
-def check_selectai_output(state: State):
-    """Gate function to check if the correct sql and result has been produced"""
 
-    global c
-    c = c + 1
-    prompt_string = check_selectai_output_prompt.format(question=state['questionlatest'], result=state['resultlatest'])
-    messages = [HumanMessage(content=prompt_string)] # Explicitly create HumanMessage
+def check_selectai_output(state: State, llm: ChatOCIGenAI) -> str:
+    """
+    Conditional edge. Evaluates the SQL result and decides the next step.
 
-    #print(f"👷🏽‍♂️ Check AI - Prompt to LLM: {prompt_string}{nl}")
+    Args:
+        state: The current state of the workflow.
+        llm: The language model instance.
 
-    result = llm.invoke(messages)
+    Returns:
+        'Pass' to proceed to the final answer generation, or 'Fail' to refine the question.
+    """
+    global retry_counter
+    retry_counter += 1
+    print(f"👷🏽‍♂️ [QA Agent] Checking result quality (Attempt {retry_counter}/{MAX_RETRIES})...")
+    
+    prompt_template = PromptTemplate(
+        input_variables=["question", "result"],
+        template=GATE_PROMPT_TEMPLATE,
+        template_format="jinja2"
+    )
+    prompt_string = prompt_template.format(question=state['questionlatest'], result=state['resultlatest'])
+    messages = [HumanMessage(content=prompt_string)]
+    response = llm.invoke(messages)
+    feedback = response.content
+    
+    print(f"👷🏽‍♂️ [QA Agent] Feedback: {feedback}\n")
 
-    print(f"👷🏽‍♂️ ### Check AI - Feedback ###: {result.content}{nl}")
-  
-    # Stop the query improvement at 5 iterations 
-    if "Pass" in result.content or c > 5:
-        c = 0
+    if "Pass" in feedback or retry_counter >= MAX_RETRIES:
+        if retry_counter >= MAX_RETRIES:
+            print("⚠️ [QA Agent] Max retries reached. Proceeding with the current result.")
+        retry_counter = 0  # Reset for the next user query
         return "Pass"
-    state['feedback'] = result.content
+    
+    state['feedback'] = feedback
     return "Fail"
 
-def result2nl(state: State):
-    """LLM call to convert the answer to natural language"""
 
-    prompt_string = result2nl_prompt.format(question=state['questionlatest'], sql=state['sqllatest'], result=state['resultlatest'])
-    messages = [HumanMessage(content=prompt_string)] # Explicitly create HumanMessage
+def result2nl(state: State, llm: ChatOCIGenAI) -> dict:
+    """
+    Node that converts the final JSON result into a natural language response.
 
-    #print(f"🙆‍♂️ JSON2NL AI - Prompt to LLM: {prompt_string}{nl}")
+    Args:
+        state: The current state of the workflow.
+        llm: The language model instance.
 
-    nl_response = llm.invoke(messages)
-    nl_text = nl_response.content
+    Returns:
+        A dictionary updating the state with the final natural language answer.
+    """
+    print("🙆‍♂️ [Formatter Agent] Converting JSON result to natural language...")
+    prompt_template = PromptTemplate(
+        input_variables=["question", "sql", "result"],
+        template=RESULT_TO_NL_TEMPLATE,
+        template_format="jinja2"
+    )
+    prompt_string = prompt_template.format(
+        question=state['questionlatest'],
+        sql=state['sqllatest'],
+        result=state['resultlatest']
+    )
+    
+    messages = [HumanMessage(content=prompt_string)]
+    response = llm.invoke(messages)
+    nl_text = response.content
 
-    print(f"🙆‍♂️ ### SelectAI to Natural Language Response ###: {nl_text}{nl}")
-
+    print(f"🙆‍♂️ [Formatter Agent] Final Answer: {nl_text}\n")
     return {"nl": nl_text}
 
 
-from langgraph.graph import StateGraph, START, END
-from IPython.display import Image, display
+# --- WORKFLOW ASSEMBLY AND EXECUTION ---
 
-# Build workflow
-workflow = StateGraph(State)
+def create_langgraph_workflow(llm: ChatOCIGenAI, connection: oracledb.Connection):
+    """Builds and compiles the LangGraph workflow."""
+    workflow = StateGraph(State)
 
-workflow.add_node("selectai", selectai)
-workflow.add_node("improve_question", improve_question)
-workflow.add_node("result2nl", result2nl)
+    # Add nodes to the graph
+    workflow.add_node("selectai", lambda state: selectai(state, connection))
+    workflow.add_node("improve_question", lambda state: improve_question(state, llm))
+    workflow.add_node("result2nl", lambda state: result2nl(state, llm))
 
-workflow.add_edge(START, "selectai")
+    # Define the graph's control flow
+    workflow.add_edge(START, "selectai")
+    workflow.add_conditional_edges(
+        "selectai",
+        lambda state: check_selectai_output(state, llm),
+        {"Pass": "result2nl", "Fail": "improve_question"}
+    )
+    workflow.add_edge("improve_question", "selectai")
+    workflow.add_edge("result2nl", END)
 
-workflow.add_conditional_edges(
-    "selectai", check_selectai_output, {"Pass": "result2nl", "Fail": "improve_question"}
-)
-workflow.add_edge("improve_question", "selectai")
-workflow.add_edge("result2nl", END)
+    return workflow.compile()
 
-chain = workflow.compile()
 
-def respond(question, history):
-    state = chain.invoke({"questionlatest": question, "sqllatest": "", "resultlatest": "", "questionhistory": [], "sqlhistory": [], "resulthistory": [], "feedback": ""})
-    return state['nl']
+def main():
+    """
+    Main function to set up services, build the workflow, and launch the UI.
+    """
+    llm = setup_llm()
+    db_connection = setup_database_connection()
+    
+    app_workflow = create_langgraph_workflow(llm, db_connection)
 
-# Chat interface
-gr.ChatInterface(
-    fn=respond,
-    type="messages",
-    title="Advanced Data Query",
-    description="Ask a question about your medical trial data, and through a process of analysis and refinement, get a natural language answer.",
-).launch()
+    def respond(question, _history):
+        """
+        Invokes the LangGraph chain for a given question.
+        
+        Args:
+            question: The user's question from the chat interface.
+            _history: The chat history (managed by Gradio, unused here).
+
+        Returns:
+            The final natural language response from the workflow.
+        """
+        initial_state = {
+            "questionlatest": question,
+            "sqllatest": "",
+            "resultlatest": "",
+            "questionhistory": [],
+            "sqlhistory": [],
+            "resulthistory": [],
+            "feedback": "",
+            "nl": ""
+        }
+        final_state = app_workflow.invoke(initial_state)
+        return final_state['nl']
+
+    # Launch the Gradio Chat Interface
+    gr.ChatInterface(
+        fn=respond,
+        title="Advanced Data Query",
+        description="Ask a question about your medical trial data. The system will analyze, refine, and query to find your answer.",
+    ).launch()
+
+    # Clean up the database connection when the app is closed
+    db_connection.close()
+    print("🔌 Database connection closed.")
+
+
+if __name__ == "__main__":
+    main()
