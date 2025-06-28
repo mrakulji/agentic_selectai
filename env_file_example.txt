@@ -1,0 +1,38 @@
+# .env
+# Configuration file for the Advanced Data Query application.
+# Fill in the placeholder values below with your specific credentials.
+
+# --- OCI Generative AI Service Configuration ---
+# The name of the LLM model you want to use 
+OCI_MODEL_ID=<model name>""
+
+# The service endpoint for the OCI Generative AI service in your region (e.g., https://inference.generativeai.us-chicago-1.oci.oraclecloud.com)
+OCI_SERVICE_ENDPOINT=" "
+
+# The OCID of the compartment where the AI model and other resources reside.
+OCI_COMPARTMENT_ID=" "
+
+
+# --- Oracle Autonomous Database (ATP/ADW) Configuration ---
+# Your database username (e.g., ADMIN).
+DB_USER=" "
+
+# The password for your database user.
+DB_PASSWORD=" "
+
+# The Data Source Name (DSN) from your tnsnames.ora file (e.g., myadb_high, myadb_medium).
+DB_DSN=" "
+
+# The path to the directory containing your tnsnames.ora and sqlnet.ora files.
+# This is usually the same path as the unzipped wallet location.
+# Example for Linux/macOS: /home/user/wallets/my_db_wallet
+# Example for Windows: C:\Users\user\Documents\DB_Wallets\my_db_wallet
+DB_CONFIG_DIR=" "
+
+# The path to the directory where you unzipped the database wallet file.
+# Example for Linux/macOS: /home/user/wallets/my_db_wallet
+# Example for Windows: C:\Users\user\Documents\DB_Wallets\my_db_wallet
+DB_WALLET_LOCATION=" "
+
+# The password you created when downloading the database wallet from the OCI console.
+DB_WALLET_PASSWORD=" "
