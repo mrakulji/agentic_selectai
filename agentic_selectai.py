@@ -373,7 +373,7 @@ def selectai(state: State, connection: oracledb.Connection) -> dict:
     query = """
         SELECT DBMS_CLOUD_AI.GENERATE(
             prompt       => :prompt,
-            profile_name => 'OCI_GENAI_TSTAPX_COMMENTS',
+            profile_name => 'OCI_GENAI',
             action       => :action
         )
         FROM dual
